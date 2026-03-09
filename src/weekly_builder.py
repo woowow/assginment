@@ -1,153 +1,106 @@
-from __future__ import annotations
-
-from collections import defaultdict
-from datetime import date, datetime, timedelta
-from pathlib import Path
-from typing import Any, Dict, List, Optional
-
-from .llm_client import LLMClient
-from .models import DailySummary
-from .utils import get_week_end, get_week_start, load_json, save_json
+import os
+import json
+from datetime import datetime, timedelta
 
 
-class WeeklyBuilder:
-    def __init__(self, config: Dict[str, Any], logger):
-        self.config = config
-        self.logger = logger
-        self.llm = LLMClient(config)
+def get_week_range(week_start: str):
+    start = datetime.strptime(week_start, "%Y-%m-%d")
+    end = start + timedelta(days=4)
+    return start.date(), end.date()
 
-    def _load_daily_summaries(self) -> List[DailySummary]:
-        daily_dir = Path(self.config["paths"]["daily_json"])
-        summaries = []
-        for path in sorted(daily_dir.glob("*.json")):
-            summaries.append(DailySummary.model_validate(load_json(path)))
-        return summaries
 
-    def _filter_week(self, summaries: List[DailySummary], week_start: date) -> List[DailySummary]:
-        week_end = get_week_end(week_start)
-        selected = []
-        for s in summaries:
-            d = datetime.fromisoformat(s.file_date).date()
-            if week_start <= d <= week_end:
-                selected.append(s)
-        return selected
+def load_daily_jsons(daily_output_dir: str):
+    items = []
+    for filename in os.listdir(daily_output_dir):
+        if filename.endswith(".json"):
+            path = os.path.join(daily_output_dir, filename)
+            with open(path, "r", encoding="utf-8") as f:
+                items.append(json.load(f))
+    return items
 
-    def _collapse_topics(self, summaries: List[DailySummary]) -> Dict[str, Any]:
-        grouped: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
 
-        for summary in summaries:
-            for item in summary.items:
-                grouped[item.topic_key].append(
-                    {
-                        "file_date": summary.file_date,
-                        "file_name": summary.file_name,
-                        "region": item.region,
-                        "headline": item.headline,
-                        "bullet": item.bullet,
-                        "topic_key": item.topic_key,
-                        "topic_label": item.topic_label,
-                        "impact_hint": item.impact_hint,
-                        "source_quotes": [q.model_dump() for q in item.source_quotes],
-                    }
-                )
+def filter_weekly_docs(docs: list, week_start: str):
+    start_date, end_date = get_week_range(week_start)
+    filtered = []
 
-        collapsed = []
-        for topic_key, items in grouped.items():
-            items_sorted = sorted(items, key=lambda x: x["file_date"])
-            latest = items_sorted[-1]
-            collapsed.append(
-                {
-                    "topic_key": topic_key,
-                    "topic_label": latest["topic_label"],
-                    "region": latest["region"],
-                    "latest": latest,
-                    "history": items_sorted,
-                    "trend_summary": self._build_trend_summary(items_sorted),
-                }
-            )
+    for doc in docs:
+        file_date = doc.get("file_date")
+        if not file_date:
+            continue
 
-        collapsed.sort(key=lambda x: (x["region"], x["latest"]["file_date"], x["topic_label"]))
-        return {"topics": collapsed}
+        dt = datetime.strptime(file_date, "%Y-%m-%d").date()
+        if start_date <= dt <= end_date:
+            filtered.append(doc)
 
-    @staticmethod
-    def _build_trend_summary(items_sorted: List[Dict[str, Any]]) -> str:
-        if len(items_sorted) <= 1:
-            return ""
-        parts = [f"{item['file_date']}: {item['headline']}" for item in items_sorted]
-        return " | ".join(parts)
+    return filtered
 
-    def build_weekly(self, week_start: Optional[date] = None) -> Dict[str, Any]:
-        week_start = week_start or get_week_start()
-        week_end = get_week_end(week_start)
-        summaries = self._load_daily_summaries()
-        weekly_summaries = self._filter_week(summaries, week_start)
-        if not weekly_summaries:
-            raise ValueError(f"No daily summaries found for week starting {week_start}")
 
-        payload = {
-            "week_start": week_start.isoformat(),
-            "week_end": week_end.isoformat(),
-            "documents": [s.model_dump() for s in weekly_summaries],
-            "collapsed": self._collapse_topics(weekly_summaries),
-        }
+def select_latest_items(weekly_docs: list):
+    latest_by_topic = {}
 
-        report_text = self.llm.build_weekly_report(week_start.isoformat(), week_end.isoformat(), payload)
-        payload["weekly_report_markdown"] = report_text
-
-        file_stub = f"weekly_{week_start.isoformat()}"
-        output_dir = Path(self.config["paths"]["weekly_reports"])
-        json_path = output_dir / f"{file_stub}.json"
-        md_path = output_dir / f"{file_stub}.md"
-        html_path = output_dir / f"{file_stub}.html"
-
-        save_json(payload, json_path)
-        md_path.write_text(report_text, encoding="utf-8")
-        html_path.write_text(self.markdown_to_basic_html(report_text), encoding="utf-8")
-
-        self.logger.info("Saved weekly report: %s", md_path)
-        return {
-            "json_path": str(json_path),
-            "md_path": str(md_path),
-            "html_path": str(html_path),
-            "report_text": report_text,
-            "week_start": week_start.isoformat(),
-            "week_end": week_end.isoformat(),
-        }
-
-    @staticmethod
-    def markdown_to_basic_html(md_text: str) -> str:
-        lines = md_text.splitlines()
-        html = ["<html><body style='font-family:Malgun Gothic,Arial,sans-serif; line-height:1.6;'>"]
-        in_list = False
-        for line in lines:
-            stripped = line.strip()
-            if not stripped:
-                if in_list:
-                    html.append("</ul>")
-                    in_list = False
-                html.append("<br>")
+    for doc in weekly_docs:
+        file_date = doc.get("file_date")
+        for item in doc.get("items", []):
+            topic_key = item.get("topic_key")
+            if not topic_key:
                 continue
-            if stripped.startswith("## "):
-                if in_list:
-                    html.append("</ul>")
-                    in_list = False
-                html.append(f"<h2>{stripped[3:]}</h2>")
-            elif stripped.startswith("**") and stripped.endswith("**"):
-                if in_list:
-                    html.append("</ul>")
-                    in_list = False
-                html.append(f"<p><strong>{stripped.strip('*')}</strong></p>")
-            elif stripped.startswith("- "):
-                if not in_list:
-                    html.append("<ul>")
-                    in_list = True
-                html.append(f"<li>{stripped[2:]}</li>")
-            else:
-                if in_list:
-                    html.append("</ul>")
-                    in_list = False
-                html.append(f"<p>{stripped}</p>")
-        if in_list:
-            html.append("</ul>")
-        html.append("</body></html>")
-        return "\n".join(html)
+
+            current = latest_by_topic.get(topic_key)
+            if current is None or file_date > current["file_date"]:
+                latest_by_topic[topic_key] = {
+                    "file_date": file_date,
+                    "item": item,
+                    "source_file": doc.get("file_name")
+                }
+
+    return latest_by_topic
+
+
+def build_weekly_markdown(week_start: str, latest_items: dict) -> str:
+    sorted_items = sorted(
+        latest_items.values(),
+        key=lambda x: (x["item"].get("region", ""), x["item"].get("headline", ""))
+    )
+
+    lines = []
+    lines.append(f"## 주간 글로벌 정세 동향 ({week_start}~)")
+    lines.append("")
+
+    current_region = None
+    for entry in sorted_items:
+        item = entry["item"]
+        region = item.get("region", "기타")
+
+        if region != current_region:
+            lines.append(f"**{region}**")
+            lines.append("")
+            current_region = region
+
+        headline = item.get("headline", "")
+        detail = item.get("detail", "")
+        implication = item.get("implication", "")
+        citations = item.get("citations", [])
+
+        line = f"- {headline}: {detail}"
+        if implication:
+            line += f" -> {implication}"
+        lines.append(line)
+
+        for c in citations:
+            quote = c.get("quote", "")
+            source = c.get("source", "")
+            lines.append(f'  [출처: {source} | 원문: "{quote}"]')
+
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def save_weekly_report(weekly_output_dir: str, week_start: str, markdown_text: str) -> str:
+    os.makedirs(weekly_output_dir, exist_ok=True)
+    output_path = os.path.join(weekly_output_dir, f"weekly_report_{week_start}.md")
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(markdown_text)
+
+    return output_path

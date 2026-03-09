@@ -1,98 +1,79 @@
-from __future__ import annotations
-
+import os
 import json
-from typing import Any, Dict, List
-
-from openai import OpenAI
-
-from .models import DailySummary
+import requests
+from typing import List, Optional
 
 
 class LLMClient:
-    def __init__(self, config: Dict[str, Any]):
-        llm_cfg = config["llm"]
-        kwargs = {"api_key": llm_cfg["api_key"]}
-        if llm_cfg.get("base_url"):
-            kwargs["base_url"] = llm_cfg["base_url"]
-        self.client = OpenAI(**kwargs)
-        self.config = config
+    def __init__(self, base_url: str, api_key: str, model_text: str, model_vision: Optional[str] = None):
+        self.base_url = base_url
+        self.api_key = api_key
+        self.model_text = model_text
+        self.model_vision = model_vision or model_text
 
-    def _chat_completion(self, model: str, messages: List[Dict[str, Any]]) -> str:
-        response = self.client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=self.config["llm"].get("temperature", 0.1),
-            max_tokens=self.config["llm"].get("max_output_tokens", 7000),
+        self.headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}"
+        }
+
+    def _post(self, payload: dict) -> dict:
+        response = requests.post(
+            self.base_url,
+            headers=self.headers,
+            json=payload,
+            timeout=180
         )
-        return response.choices[0].message.content or ""
+        response.raise_for_status()
+        return response.json()
 
-    def summarize_daily_pdf(self, pdf_payload, file_date_iso: str) -> DailySummary:
-        system_prompt = self.config["prompt"]["system"]
-        user_template = self.config["prompt"]["daily_user_template"]
+    def _extract_content(self, result: dict) -> str:
+        if "choices" in result and len(result["choices"]) > 0:
+            choice = result["choices"][0]
 
-        content: List[Dict[str, Any]] = [
-            {
-                "type": "text",
-                "text": (
-                    f"{user_template}\n\n"
-                    f"file_name: {pdf_payload.file_name}\n"
-                    f"file_date: {file_date_iso}\n\n"
-                    f"full_text:\n{pdf_payload.full_text[:100000]}"
-                ),
-            }
-        ]
+            if "message" in choice and "content" in choice["message"]:
+                return choice["message"]["content"]
 
-        for page in pdf_payload.pages:
-            if page.image_b64:
-                content.append(
-                    {"type": "text", "text": f"page {page.page_number} text:\n{page.text[:10000]}"}
-                )
-                content.append(
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/png;base64,{page.image_b64}"},
-                    }
-                )
+            if "text" in choice:
+                return choice["text"]
 
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": content},
-        ]
+        return json.dumps(result, ensure_ascii=False, indent=2)
 
-        raw = self._chat_completion(self.config["llm"]["model_vision"], messages)
-        data = json.loads(self._extract_json(raw))
-        return DailySummary.model_validate(data)
+    def summarize_text(self, prompt: str, temperature: float = 0.2) -> str:
+        payload = {
+            "model": self.model_text,
+            "input": prompt,
+            "stream": False,
+            "temperature": temperature
+        }
 
-    def build_weekly_report(self, week_start: str, week_end: str, weekly_payload: Dict[str, Any]) -> str:
-        system_prompt = self.config["prompt"]["system"]
-        user_template = self.config["prompt"]["weekly_user_template"]
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {
-                "role": "user",
-                "content": (
-                    f"{user_template}\n\n"
-                    f"week_start: {week_start}\n"
-                    f"week_end: {week_end}\n\n"
-                    f"structured_data:\n{json.dumps(weekly_payload, ensure_ascii=False, indent=2)}"
-                ),
-            },
-        ]
-        response = self.client.chat.completions.create(
-            model=self.config["llm"]["model_text"],
-            messages=messages,
-            temperature=self.config["llm"].get("temperature", 0.1),
-            max_tokens=self.config["llm"].get("max_output_tokens", 7000),
-        )
-        return response.choices[0].message.content or ""
+        result = self._post(payload)
+        return self._extract_content(result)
 
-    @staticmethod
-    def _extract_json(raw: str) -> str:
-        raw = raw.strip()
-        if raw.startswith("```"):
-            raw = raw.replace("```json", "", 1).replace("```", "").strip()
-        start = raw.find("{")
-        end = raw.rfind("}")
-        if start == -1 or end == -1:
-            raise ValueError("Model output does not contain JSON object")
-        return raw[start:end + 1]
+    def summarize_with_images(
+        self,
+        prompt: str,
+        image_base64_list: Optional[List[str]] = None,
+        temperature: float = 0.2
+    ) -> str:
+        """
+        네 API가 이미지 입력을 지원하지 않을 수도 있으므로,
+        우선 텍스트만 보낼 수 있게 설계.
+        이미지 지원 API라면 payload 형식을 네 서버 스펙에 맞게 바꾸면 됨.
+        """
+
+        if not image_base64_list:
+            return self.summarize_text(prompt, temperature=temperature)
+
+        # 기본값: 이미지 지원이 확실하지 않으므로 텍스트에 이미지 존재 사실만 추가
+        image_notice = f"\n\n[참고] 원문에는 이미지/도표 페이지 {len(image_base64_list)}장이 포함되어 있습니다."
+        merged_prompt = prompt + image_notice
+
+        payload = {
+            "model": self.model_vision,
+            "input": merged_prompt,
+            "stream": False,
+            "temperature": temperature
+        }
+
+        result = self._post(payload)
+        return self._extract_content(result)

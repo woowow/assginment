@@ -1,33 +1,24 @@
-from __future__ import annotations
-
-from pathlib import Path
-from typing import Any, Dict
+import os
+import win32com.client
 
 
-class OutlookSender:
-    def __init__(self, config: Dict[str, Any], logger):
-        self.config = config
-        self.logger = logger
+def markdown_to_html_simple(md_text: str) -> str:
+    html = md_text.replace("\n", "<br>")
+    return f"<html><body>{html}</body></html>"
 
-    def send_html_report(self, subject: str, html_body: str) -> None:
-        try:
-            import win32com.client  # type: ignore
-        except ImportError as exc:
-            raise RuntimeError("pywin32 is required on Windows for Outlook sending") from exc
 
-        outlook = win32com.client.Dispatch("Outlook.Application")
-        mail = outlook.CreateItem(0)
-        mail.Subject = subject
-        mail.HTMLBody = html_body
-        mail.To = ";".join(self.config["outlook"].get("to", []))
-        mail.CC = ";".join(self.config["outlook"].get("cc", []))
-        mail.Importance = self.config["outlook"].get("importance", 2)
+def send_outlook_mail(subject: str, body_markdown: str, to_list: list, cc_list: list = None, mode: str = "draft"):
+    cc_list = cc_list or []
 
-        mode = self.config["app"].get("send_mode", "draft").lower()
-        if mode == "send":
-            mail.Send()
-            self.logger.info("Outlook mail sent: %s", subject)
-        else:
-            mail.Save()
-            mail.Display(False)
-            self.logger.info("Outlook draft created: %s", subject)
+    outlook = win32com.client.Dispatch("Outlook.Application")
+    mail = outlook.CreateItem(0)
+
+    mail.Subject = subject
+    mail.To = ";".join(to_list)
+    mail.CC = ";".join(cc_list)
+    mail.HTMLBody = markdown_to_html_simple(body_markdown)
+
+    if mode == "send":
+        mail.Send()
+    else:
+        mail.Save()

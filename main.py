@@ -1,60 +1,88 @@
-from __future__ import annotations
-
+import os
 import argparse
-from datetime import date, datetime
-from pathlib import Path
 
-from src.config import ensure_directories, load_config
-from src.daily_processor import DailyProcessor
-from src.outlook_sender import OutlookSender
-from src.weekly_builder import WeeklyBuilder
-from src.utils import get_week_start, setup_logger
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="EG Daily Brief automation")
-    parser.add_argument("command", choices=["process-daily", "build-weekly", "send-weekly"])
-    parser.add_argument("--config", default="config.yaml")
-    parser.add_argument("--week", default=None, help="Week start date in YYYY-MM-DD")
-    parser.add_argument("--force", action="store_true")
-    return parser.parse_args()
+from src.config_loader import load_config
+from src.llm_client import LLMClient
+from src.daily_processor import process_single_pdf
+from src.weekly_builder import (
+    load_daily_jsons,
+    filter_weekly_docs,
+    select_latest_items,
+    build_weekly_markdown,
+    save_weekly_report,
+)
+from src.outlook_sender import send_outlook_mail
 
 
-def resolve_week_start(week_str: str | None) -> date:
-    if week_str:
-        return datetime.strptime(week_str, "%Y-%m-%d").date()
-    return get_week_start()
+def process_daily(config):
+    input_dir = config["paths"]["input_dir"]
+    output_dir = config["paths"]["daily_output_dir"]
+
+    llm = LLMClient(
+        base_url=config["llm"]["base_url"],
+        api_key=config["llm"]["api_key"],
+        model_text=config["llm"]["model_text"],
+        model_vision=config["llm"]["model_vision"],
+    )
+
+    for filename in os.listdir(input_dir):
+        if filename.lower().endswith(".pdf"):
+            pdf_path = os.path.join(input_dir, filename)
+            print(f"[PROCESS] {pdf_path}")
+            out = process_single_pdf(pdf_path, llm, output_dir)
+            print(f"[DONE] {out}")
 
 
-def main() -> None:
-    args = parse_args()
-    config = load_config(args.config)
-    ensure_directories(config)
-    logger = setup_logger(config["paths"]["logs"])
+def build_weekly(config, week_start: str):
+    daily_output_dir = config["paths"]["daily_output_dir"]
+    weekly_output_dir = config["paths"]["weekly_output_dir"]
+
+    docs = load_daily_jsons(daily_output_dir)
+    weekly_docs = filter_weekly_docs(docs, week_start)
+    latest_items = select_latest_items(weekly_docs)
+    markdown_text = build_weekly_markdown(week_start, latest_items)
+    report_path = save_weekly_report(weekly_output_dir, week_start, markdown_text)
+
+    print(f"[WEEKLY REPORT] {report_path}")
+    return report_path, markdown_text
+
+
+def send_weekly(config, week_start: str):
+    report_path, markdown_text = build_weekly(config, week_start)
+
+    subject_prefix = config["outlook"]["subject_prefix"]
+    subject = f"{subject_prefix} ({week_start} 주차)"
+    to_list = config["outlook"]["to"]
+    cc_list = config["outlook"].get("cc", [])
+    mode = config["app"]["send_mode"]
+
+    send_outlook_mail(subject, markdown_text, to_list, cc_list, mode=mode)
+    print(f"[OUTLOOK] mode={mode}, report={report_path}")
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest="command")
+
+    subparsers.add_parser("process-daily")
+
+    weekly_parser = subparsers.add_parser("build-weekly")
+    weekly_parser.add_argument("--week", required=True, help="예: 2026-03-02")
+
+    send_parser = subparsers.add_parser("send-weekly")
+    send_parser.add_argument("--week", required=True, help="예: 2026-03-02")
+
+    args = parser.parse_args()
+    config = load_config("config.yaml")
 
     if args.command == "process-daily":
-        processor = DailyProcessor(config, logger)
-        processed = processor.process_all(force=args.force)
-        logger.info("Processed %s PDFs", len(processed))
-        return
-
-    week_start = resolve_week_start(args.week)
-    builder = WeeklyBuilder(config, logger)
-
-    if args.command == "build-weekly":
-        result = builder.build_weekly(week_start)
-        logger.info("Weekly report built: %s", result["md_path"])
-        return
-
-    if args.command == "send-weekly":
-        result = builder.build_weekly(week_start)
-        html_body = Path(result["html_path"]).read_text(encoding="utf-8")
-        subject_template = config["app"]["executive_email_subject"]
-        range_text = f"{result['week_start']} ~ {result['week_end']}"
-        subject = subject_template.format(range=range_text)
-        sender = OutlookSender(config, logger)
-        sender.send_html_report(subject, html_body)
-        return
+        process_daily(config)
+    elif args.command == "build-weekly":
+        build_weekly(config, args.week)
+    elif args.command == "send-weekly":
+        send_weekly(config, args.week)
+    else:
+        parser.print_help()
 
 
 if __name__ == "__main__":
