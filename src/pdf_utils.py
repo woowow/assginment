@@ -1,6 +1,6 @@
 import base64
-import fitz  # PyMuPDF
 from typing import List
+import fitz  # PyMuPDF
 
 
 def extract_text_from_pdf(pdf_path: str) -> str:
@@ -8,7 +8,9 @@ def extract_text_from_pdf(pdf_path: str) -> str:
     texts = []
 
     for page in doc:
-        texts.append(page.get_text("text"))
+        text = page.get_text("text")
+        if text:
+            texts.append(text)
 
     doc.close()
     return "\n".join(texts)

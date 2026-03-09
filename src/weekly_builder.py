@@ -10,13 +10,18 @@ def get_week_range(week_start: str):
 
 
 def load_daily_jsons(daily_output_dir: str):
-    items = []
+    docs = []
+
+    if not os.path.exists(daily_output_dir):
+        return docs
+
     for filename in os.listdir(daily_output_dir):
         if filename.endswith(".json"):
             path = os.path.join(daily_output_dir, filename)
             with open(path, "r", encoding="utf-8") as f:
-                items.append(json.load(f))
-    return items
+                docs.append(json.load(f))
+
+    return docs
 
 
 def filter_weekly_docs(docs: list, week_start: str):
@@ -40,24 +45,29 @@ def select_latest_items(weekly_docs: list):
 
     for doc in weekly_docs:
         file_date = doc.get("file_date")
+        file_name = doc.get("file_name", "")
+
         for item in doc.get("items", []):
             topic_key = item.get("topic_key")
             if not topic_key:
                 continue
 
-            current = latest_by_topic.get(topic_key)
-            if current is None or file_date > current["file_date"]:
-                latest_by_topic[topic_key] = {
-                    "file_date": file_date,
-                    "item": item,
-                    "source_file": doc.get("file_name")
-                }
+            existing = latest_by_topic.get(topic_key)
+
+            candidate = {
+                "file_date": file_date,
+                "file_name": file_name,
+                "item": item
+            }
+
+            if existing is None or file_date > existing["file_date"]:
+                latest_by_topic[topic_key] = candidate
 
     return latest_by_topic
 
 
 def build_weekly_markdown(week_start: str, latest_items: dict) -> str:
-    sorted_items = sorted(
+    entries = sorted(
         latest_items.values(),
         key=lambda x: (x["item"].get("region", ""), x["item"].get("headline", ""))
     )
@@ -67,7 +77,8 @@ def build_weekly_markdown(week_start: str, latest_items: dict) -> str:
     lines.append("")
 
     current_region = None
-    for entry in sorted_items:
+
+    for entry in entries:
         item = entry["item"]
         region = item.get("region", "기타")
 
@@ -76,19 +87,22 @@ def build_weekly_markdown(week_start: str, latest_items: dict) -> str:
             lines.append("")
             current_region = region
 
-        headline = item.get("headline", "")
-        detail = item.get("detail", "")
-        implication = item.get("implication", "")
+        headline = item.get("headline", "").strip()
+        detail = item.get("detail", "").strip()
+        implication = item.get("implication", "").strip()
         citations = item.get("citations", [])
 
-        line = f"- {headline}: {detail}"
+        bullet = f"- {headline}"
+        if detail:
+            bullet += f": {detail}"
         if implication:
-            line += f" -> {implication}"
-        lines.append(line)
+            bullet += f" -> {implication}"
+
+        lines.append(bullet)
 
         for c in citations:
-            quote = c.get("quote", "")
-            source = c.get("source", "")
+            quote = c.get("quote", "").strip()
+            source = c.get("source", "").strip()
             lines.append(f'  [출처: {source} | 원문: "{quote}"]')
 
         lines.append("")

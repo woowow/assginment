@@ -21,21 +21,47 @@ def parse_date_from_filename(filename: str, year: int = 2026) -> Optional[str]:
     return dt.strftime("%Y-%m-%d")
 
 
+def strip_json_code_fence(text: str) -> str:
+    text = text.strip()
+
+    if text.startswith("```json"):
+        text = text[len("```json"):].strip()
+    elif text.startswith("```"):
+        text = text[len("```"):].strip()
+
+    if text.endswith("```"):
+        text = text[:-3].strip()
+
+    return text
+
+
 def build_daily_prompt(filename: str, pdf_text: str) -> str:
     return f"""
 당신은 글로벌 정세 분석 전문가입니다.
-아래 Eurasia Group Daily Brief PDF 원문만을 기반으로 구조화 요약을 작성하세요.
+Eurasia Group의 Daily Brief PDF 원문만을 기반으로 구조화 요약을 작성하세요.
+
+[수신 대상]
+- 임원진(C-Level)
+- 해당 동향을 바탕으로 담당 고객사(국내 50대 대기업)에 미치는 영향을 판단하는 데 활용
 
 [절대 규칙]
-- 입력된 원문에 명시적으로 기재된 내용만 사용할 것
-- 외부 지식, 추측, 의견을 절대 포함하지 말 것
-- 원문에 없는 수치·사실·인과관계를 임의로 생성하지 말 것
-- 확인되지 않는 내용은 쓰지 말 것
+- 입력된 PDF 원문에 명시적으로 기재된 내용만 사용할 것
+- AI가 사전 학습한 지식, 외부 정보, 추측, 의견을 절대 포함하지 말 것
+- 원문에 없는 수치·사실·인과관계를 임의로 생성하거나 추가하지 말 것
+- 확인되지 않는 내용은 쓰지 않는 것이 누락보다 낫다
+- 모든 item에는 반드시 출처(PDF파일명 + 원문 문장 그대로 인용)를 포함할 것
+- 출처가 없는 item은 작성하지 말 것
+- 반드시 markdown 코드블록 없이 순수 JSON만 출력할 것
 
-[해야 할 일]
-1. 이 문서의 핵심 이슈를 국가/지역 기준으로 정리
-2. 국내 50대 대기업에 영향을 줄 가능성이 있는 사안만 우선 반영
-3. 아래 JSON 형식으로만 답변
+[처리 목표]
+1. 문서 전체를 읽고 국가/지역별 주요 동향을 분류
+2. 국내 50대 대기업에 실질적 영향이 있는 이슈를 우선 선별
+3. 이후 주간 요약에서 같은 주제를 묶을 수 있도록 topic_key를 안정적으로 생성
+
+[topic_key 작성 규칙]
+- 영어 snake_case로 작성
+- 같은 주제는 같은 키가 나오도록 최대한 일관되게 작성
+- 예: us_tariffs, japan_rate_hike, china_export_controls, middle_east_shipping_risk
 
 [출력 JSON 형식]
 {{
@@ -44,10 +70,10 @@ def build_daily_prompt(filename: str, pdf_text: str) -> str:
   "items": [
     {{
       "region": "미국",
-      "topic_key": "us_tariff_policy",
-      "headline": "핵심 한 줄",
+      "topic_key": "us_tariffs",
+      "headline": "해당 주 핵심 내용 한 줄",
       "detail": "세부 내용",
-      "implication": "국내 기업 영향 또는 빈 문자열",
+      "implication": "국내 50대 대기업 영향. 없으면 빈 문자열",
       "citations": [
         {{
           "quote": "원문 문장 그대로",
@@ -70,15 +96,18 @@ def process_single_pdf(pdf_path: str, llm_client, output_dir: str, year: int = 2
     image_b64_list = render_pdf_pages_to_base64(pdf_path, max_pages=3)
 
     prompt = build_daily_prompt(filename, pdf_text)
-    response_text = llm_client.summarize_with_images(prompt, image_b64_list=image_b64_list)
+    response_text = llm_client.summarize_with_images(prompt, image_base64_list=image_b64_list)
+    cleaned_text = strip_json_code_fence(response_text)
 
     try:
-        result = json.loads(response_text)
+        result = json.loads(cleaned_text)
     except json.JSONDecodeError:
         result = {
             "file_name": filename,
             "file_date": file_date,
-            "raw_response": response_text
+            "raw_response": response_text,
+            "cleaned_response": cleaned_text,
+            "items": []
         }
 
     result["file_date"] = file_date

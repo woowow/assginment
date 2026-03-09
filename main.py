@@ -14,22 +14,32 @@ from src.weekly_builder import (
 from src.outlook_sender import send_outlook_mail
 
 
-def process_daily(config):
-    input_dir = config["paths"]["input_dir"]
-    output_dir = config["paths"]["daily_output_dir"]
-
-    llm = LLMClient(
+def get_llm_client(config):
+    return LLMClient(
         base_url=config["llm"]["base_url"],
         api_key=config["llm"]["api_key"],
         model_text=config["llm"]["model_text"],
-        model_vision=config["llm"]["model_vision"],
+        model_vision=config["llm"].get("model_vision", config["llm"]["model_text"]),
+        timeout_seconds=config["llm"].get("timeout_seconds", 300),
     )
+
+
+def process_daily(config):
+    input_dir = config["paths"]["input_dir"]
+    output_dir = config["paths"]["daily_output_dir"]
+    year = config["app"].get("default_year", 2026)
+
+    llm = get_llm_client(config)
+
+    if not os.path.exists(input_dir):
+        print(f"[ERROR] input_dir not found: {input_dir}")
+        return
 
     for filename in os.listdir(input_dir):
         if filename.lower().endswith(".pdf"):
             pdf_path = os.path.join(input_dir, filename)
             print(f"[PROCESS] {pdf_path}")
-            out = process_single_pdf(pdf_path, llm, output_dir)
+            out = process_single_pdf(pdf_path, llm, output_dir, year=year)
             print(f"[DONE] {out}")
 
 
