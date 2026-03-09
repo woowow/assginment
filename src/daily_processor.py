@@ -6,7 +6,7 @@ from typing import Optional
 
 from src.pdf_utils import extract_text_from_pdf, render_pdf_pages_to_base64
 from src.prompts import build_daily_short_prompt, build_daily_structured_prompt
-
+from src.daily_summary_exporter import append_daily_summary_csv
 
 DATE_PATTERN = re.compile(r"\((\d{1,2})\.(\d{1,2})\)")
 
@@ -41,7 +41,7 @@ def safe_load_json(text: str) -> dict:
     return json.loads(cleaned)
 
 
-def process_single_pdf(pdf_path: str, llm_client, output_dir: str, year: int = 2026):
+def process_single_pdf(pdf_path: str, llm_client, output_dir: str, csv_path: str, year: int = 2026):
     filename = os.path.basename(pdf_path)
     file_date = parse_date_from_filename(filename, year=year)
     pdf_text = extract_text_from_pdf(pdf_path)
@@ -81,4 +81,5 @@ def process_single_pdf(pdf_path: str, llm_client, output_dir: str, year: int = 2
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
 
+    append_daily_summary_csv(csv_path, result)
     return output_path

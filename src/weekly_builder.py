@@ -1,5 +1,6 @@
 import os
 import json
+import html
 from datetime import datetime, timedelta
 
 from src.prompts import build_weekly_final_prompt
@@ -111,16 +112,132 @@ def build_weekly_report_text(llm_client, week_start: str, weekly_docs: list):
     return weekly_text, weekly_input_data
 
 
-def save_weekly_report(weekly_output_dir: str, week_start: str, report_text: str, weekly_input_data: dict) -> tuple[str, str]:
+def split_weekly_report_and_references(report_text: str):
+    lines = report_text.splitlines()
+
+    main_lines = []
+    ref_lines = []
+
+    current_section = None
+    last_bullet = None
+
+    for line in lines:
+        stripped = line.strip()
+
+        if stripped.startswith("[주요 아젠다 별 한국 기업에의 영향]"):
+            current_section = "agenda"
+            main_lines.append(line)
+            continue
+
+        if stripped.startswith("[국가 및 권역별 주요 동향 - 상세]"):
+            current_section = "regional"
+            main_lines.append(line)
+            ref_lines.append(line)
+            continue
+
+        if stripped.startswith("[출처:"):
+            if current_section == "regional":
+                if last_bullet:
+                    ref_lines.append(last_bullet)
+                ref_lines.append(line)
+                ref_lines.append("")
+            continue
+
+        if current_section == "regional":
+            main_lines.append(line)
+            if stripped.startswith("- "):
+                last_bullet = line
+            elif stripped.startswith("**"):
+                last_bullet = line
+        else:
+            main_lines.append(line)
+
+    return "\n".join(main_lines).strip(), "\n".join(ref_lines).strip()
+
+def simple_markdown_to_html(md_text: str, title: str = "Weekly Report") -> str:
+    lines = md_text.splitlines()
+    html_lines = []
+
+    for line in lines:
+        stripped = line.strip()
+
+        if not stripped:
+            html_lines.append("<div style='height:8px;'></div>")
+            continue
+
+        if stripped.startswith("[") and stripped.endswith("]"):
+            html_lines.append(
+                f"<h2 style='margin:20px 0 10px 0; font-size:20px; color:#1f1f1f;'>{html.escape(stripped)}</h2>"
+            )
+            continue
+
+        if stripped.startswith("**") and stripped.endswith("**"):
+            text = stripped.strip("*")
+            html_lines.append(
+                f"<h3 style='margin:16px 0 8px 0; font-size:17px; color:#2c3e50;'>{html.escape(text)}</h3>"
+            )
+            continue
+
+        if stripped.startswith("- "):
+            text = html.escape(stripped[2:])
+            html_lines.append(
+                f"<div style='margin:6px 0 6px 18px; line-height:1.6;'>• {text}</div>"
+            )
+            continue
+
+        if stripped.startswith("(") and stripped.endswith(")"):
+            html_lines.append(
+                f"<div style='margin:4px 0 8px 22px; color:#555; line-height:1.5;'><i>{html.escape(stripped)}</i></div>"
+            )
+            continue
+
+        html_lines.append(
+            f"<div style='margin:4px 0; line-height:1.6;'>{html.escape(stripped)}</div>"
+        )
+
+    body = "\n".join(html_lines)
+
+    return f"""
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>{html.escape(title)}</title>
+</head>
+<body style="font-family:'Malgun Gothic', Arial, sans-serif; font-size:14px; color:#222; margin:32px; max-width:1000px;">
+  <div style="border-bottom:2px solid #e5e7eb; padding-bottom:12px; margin-bottom:20px;">
+    <h1 style="margin:0; font-size:24px;">{html.escape(title)}</h1>
+  </div>
+  {body}
+</body>
+</html>
+""".strip()
+
+def save_weekly_report(weekly_output_dir: str, week_start: str, report_text: str, weekly_input_data: dict):
     os.makedirs(weekly_output_dir, exist_ok=True)
 
+    main_report_text, reference_report_text = split_weekly_report_and_references(report_text)
+
     md_path = os.path.join(weekly_output_dir, f"weekly_report_{week_start}.md")
+    html_path = os.path.join(weekly_output_dir, f"weekly_report_{week_start}.html")
+
+    ref_md_path = os.path.join(weekly_output_dir, f"weekly_report_{week_start}_reference.md")
+    ref_html_path = os.path.join(weekly_output_dir, f"weekly_report_{week_start}_reference.html")
+
     json_path = os.path.join(weekly_output_dir, f"weekly_report_{week_start}_input.json")
 
     with open(md_path, "w", encoding="utf-8") as f:
-        f.write(report_text)
+        f.write(main_report_text)
+
+    with open(html_path, "w", encoding="utf-8") as f:
+        f.write(simple_markdown_to_html(main_report_text, title=f"주간 글로벌 정세 동향 ({week_start})"))
+
+    with open(ref_md_path, "w", encoding="utf-8") as f:
+        f.write(reference_report_text)
+
+    with open(ref_html_path, "w", encoding="utf-8") as f:
+        f.write(simple_markdown_to_html(reference_report_text, title=f"주간 글로벌 정세 동향 출처 ({week_start})"))
 
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(weekly_input_data, f, ensure_ascii=False, indent=2)
 
-    return md_path, json_path
+    return md_path, html_path, ref_md_path, ref_html_path, json_path
