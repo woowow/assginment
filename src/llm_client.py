@@ -34,7 +34,6 @@ class LLMClient:
         return response.json()
 
     def _extract_content(self, result: dict) -> str:
-        # 네 서버 구조: output -> content -> text
         if "output" in result and isinstance(result["output"], list):
             for output_item in result["output"]:
                 if output_item.get("type") == "message":
@@ -42,13 +41,10 @@ class LLMClient:
                         if content_item.get("type") == "output_text":
                             return content_item.get("text", "")
 
-        # 예비 호환: choices 구조도 대응
         if "choices" in result and isinstance(result["choices"], list) and result["choices"]:
             choice = result["choices"][0]
-
             if "message" in choice and "content" in choice["message"]:
                 return choice["message"]["content"]
-
             if "text" in choice:
                 return choice["text"]
 
@@ -61,7 +57,6 @@ class LLMClient:
             "stream": False,
             "temperature": temperature
         }
-
         result = self._post(payload)
         return self._extract_content(result)
 
@@ -71,25 +66,11 @@ class LLMClient:
         image_base64_list: Optional[List[str]] = None,
         temperature: float = 0.0
     ) -> str:
-        # 현재는 네 API의 이미지 입력 스펙을 모르므로
-        # 텍스트 기반 처리 + 이미지 존재 사실만 전달
-        if not image_base64_list:
-            return self.summarize_text(prompt, temperature=temperature)
-
-        image_notice = (
-            f"\n\n[참고] 원문 PDF에는 이미지/도표가 포함되어 있으며, "
-            f"앞부분 페이지 기준 {len(image_base64_list)}장의 시각 자료가 존재합니다. "
-            f"텍스트에 명시된 내용만 사용하고 추측은 금지합니다."
-        )
-
-        merged_prompt = prompt + image_notice
-
-        payload = {
-            "model": self.model_vision,
-            "input": merged_prompt,
-            "stream": False,
-            "temperature": temperature
-        }
-
-        result = self._post(payload)
-        return self._extract_content(result)
+        # 현재 API 이미지 스펙 미확인 상태라 텍스트 기반으로 우선 처리
+        if image_base64_list:
+            prompt += (
+                f"\n\n[참고] 원문 PDF에는 이미지/도표가 포함되어 있으며 "
+                f"앞부분 기준 {len(image_base64_list)}장의 시각 자료가 존재합니다. "
+                f"텍스트에 명시된 내용만 사용하고 추측은 금지합니다."
+            )
+        return self.summarize_text(prompt, temperature=temperature)
